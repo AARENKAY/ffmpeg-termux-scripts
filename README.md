@@ -2,7 +2,7 @@
 
 Hi there! 👋
 I'm not a coder, just someone who tinkers and likes to automate things a bit.
-These scripts were made using AI tools like ChatGPT, DeepSeek, and a lot of trial and error on Android + Termux.
+These scripts were made using AI tools like Claude, ChatGPT, DeepSeek, and a lot of trial and error on Android + Termux.
 I found them helpful, so I'm sharing them here in case they help someone else too. Feel free to edit, improve, or remix them as you like! 😊
 
 
