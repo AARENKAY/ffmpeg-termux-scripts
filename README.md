@@ -1,342 +1,357 @@
-# Termux Video Converter
+# FFmpeg Tools
 
-An interactive batch video converter for **Termux on Android** (it also runs on plain Linux). It wraps `ffmpeg` in a phone-friendly menu and is tuned for long, slow encodes on a device that can overheat:
+A set of interactive Bash tools for converting, compressing, trimming, merging and GIF-ing video with FFmpeg. They are built for **Termux on Android** (phone-friendly menus, thermal protection, low-CPU defaults) but also run on regular Linux.
 
-- converts a single file or a whole folder tree
-- splits long videos into chunks, resumes after an interruption, and merges the chunks afterwards
-- pauses between files and chunks so the CPU can cool down
-- checks every output before marking it done
-- keeps failed files aside and offers a guided diagnosis and recovery
+| Script | What it does |
+| --- | --- |
+| `convert.sh` | Batch video converter with a full settings menu, chunked encoding, resume support and failure diagnostics |
+| `compress.sh` | Compress videos to a target file size or bitrate (H.264 / AV1), optional resolution cap, video → GIF |
+| `trim.sh` | Cut, split and join parts of a video, either losslessly (stream copy) or with exact re-encoded cuts |
+| `merge.sh` | Merge all videos in one or more folders into a single file per folder |
+| `v2g.sh` | Batch Video → GIF and GIF → Video converter |
 
-The defaults give a small, good-looking file: **SVT-AV1 10-bit-friendly video + Opus audio in MKV**.
+`convert.sh` loads the `lib-*.sh` files next to it. The other four scripts are standalone.
 
 ---
 
 ## Contents
 
-1. [Quick start](#quick-start)
-2. [Requirements](#requirements)
-3. [Usage](#usage)
-4. [Main menu](#main-menu)
-5. [Advanced menu](#advanced-menu)
-6. [How it works](#how-it-works)
-7. [Where files go](#where-files-go)
-8. [Configuration file](#configuration-file)
-9. [Failures, diagnosis and recovery](#failures-diagnosis-and-recovery)
-10. [Project layout](#project-layout)
-11. [Notes and limitations](#notes-and-limitations)
-12. [Troubleshooting](#troubleshooting)
-
----
-
-## Quick start
-
-```bash
-# 1. One-time setup (Termux)
-termux-setup-storage
-pkg update
-pkg install ffmpeg mkvtoolnix gawk coreutils findutils grep sed diffutils
-
-# 2. Put the scripts in one folder and make the launcher executable
-cp /sdcard/Download/*.sh "$HOME/" && chmod +x "$HOME"/*.sh
-
-# 3. Run it
-cd "$HOME"
-./convert.sh
-```
-
-Drop videos into `/sdcard/Movies/ffmpeg/Job`, choose **7 Start** and press Enter at the path prompt. Converted files appear in `/sdcard/Movies/ffmpeg/Converted`.
-
-> All `.sh` files must stay **in the same folder**. `convert.sh` loads the `lib-*.sh` modules from its own directory.
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [convert.sh](#convertsh)
+- [compress.sh](#compresssh)
+- [trim.sh](#trimsh)
+- [merge.sh](#mergesh)
+- [v2g.sh](#v2gsh)
+- [Default folders and environment overrides](#default-folders-and-environment-overrides)
+- [Project layout](#project-layout)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
 ## Requirements
 
-| Needed | Termux package | Notes |
-|---|---|---|
-| `ffmpeg`, `ffprobe` | `ffmpeg` | Must include the encoders you plan to use (`libsvtav1`, `libx264`, `libx265`, `libvpx`, `libvpx-vp9`, `libaom-av1`, `libopus`) |
-| `mkvmerge` | `mkvtoolnix` | Used to join chunks when the output is MKV. If it is missing or fails, an ffmpeg concat fallback is used |
-| `awk` | `gawk` | |
-| `stat`, `realpath`, `du`, `date`, `ls`, `head`, `cut`, `tr`, `wc`, `tee`, `sleep`, `sha256sum`, `sort` | `coreutils` | |
-| `find`, `xargs` | `findutils` | |
-| `grep`, `sed`, `comm` | `grep`, `sed`, `diffutils` | |
-| `mediainfo` | `mediainfo` | **Optional.** Only a last-resort fallback for reading bitrates |
+**Always needed**
 
-At start-up the script checks for the required tools and prints the exact `pkg install` command for anything that is missing.
+- Bash 4.0 or newer
+- `ffmpeg` and `ffprobe`
+- Standard tools: `awk`, `sed`, `grep`, `find`, `xargs`, `sort`, `stat`, `realpath`, `du`, `date`, `sha256sum` and friends (all included in Termux's `coreutils`, `findutils`, `gawk`, `grep`, `diffutils`)
 
-Shared storage (`/sdcard/...`, `/storage/<card-id>/...`) needs `termux-setup-storage` once. If a folder cannot be created or written, the script says so and repeats this hint.
+**Encoders (depending on what you use)**
+
+- `libx264`, `libopus` (compress/trim/GIF→video defaults)
+- `libsvtav1` (default codec in `convert.sh`; optional AV1 in `compress.sh`)
+- `libx265`, `libvpx`, `libvpx-vp9`, `libaom-av1` (selectable in `convert.sh`)
+
+**Optional**
+
+- `mkvmerge` (package `mkvtoolnix`): `merge.sh` uses it first, then falls back to FFmpeg concat. `convert.sh` also checks for it at startup.
+- `termux-api` plus the Termux:API app: battery-temperature guard in `compress.sh`
+- `mediainfo`: last-resort bitrate fallback in the probe library
+
+### Termux setup
+
+```bash
+pkg update
+pkg install ffmpeg coreutils findutils gawk grep sed diffutils
+# optional, for merge.sh / convert.sh:
+pkg install x11-repo && pkg install mkvtoolnix
+# optional, for the temperature guard in compress.sh:
+pkg install termux-api
+
+# give Termux access to /sdcard (needed for the default folders):
+termux-setup-storage
+```
+
+`convert.sh` checks its dependencies on launch and prints the exact `pkg install` line for anything missing.
 
 ---
 
-## Usage
+## Installation
 
-### Interactive
+1. Put all 14 files in the same folder (for example `~/ffmpeg_tools`).
+2. Make them executable:
 
-```bash
-./convert.sh
-```
+   ```bash
+   chmod +x ~/ffmpeg_tools/*.sh
+   ```
 
-Opens the main menu (below). Settings you change are used immediately. Use **8 Save** to keep them for next time.
+   If you downloaded them to your phone's Downloads folder, you can copy them into Termux's home first:
 
-### Command line
+   ```bash
+   cp /sdcard/Download/*.sh "$HOME/" && chmod +x "$HOME"/*.sh
+   ```
 
-```bash
-./convert.sh /path/to/video.mp4      # one file
-./convert.sh /path/to/folder         # every video in the folder and its subfolders
-```
+3. Run any script from that folder, e.g. `./convert.sh`.
 
-Settings come from the saved configuration. The exit code is `0` on success and `1` if any file failed, so the script can be used from other scripts.
-
-### Supported input formats
-
-`mp4 mkv mov avi webm wmv flv mpeg mpg mpe m4v 3gp 3g2 f4v ts m2ts mts vob`
-
-### Verbose module loading
-
-```bash
-VERBOSE_LOAD=1 ./convert.sh
-```
+> **Keep `convert.sh` and every `lib-*.sh` file together.** `convert.sh` exits with an error if a module is missing.
 
 ---
 
-## Main menu
+## convert.sh
 
-```
- 1  Codec          video encoder
- 2  Quality (CRF)  lower = better quality, bigger file
- 3  Speed preset   slower = smaller file, longer encode
- 4  Audio codec
- 5  Audio bitrate  kbps
- 6  Advanced       more options
- 7  Start
- 8  Save
- 9  Diagnose
- 0  Exit
+The main tool. It converts a single file or a whole folder using one set of settings and shows a live progress bar with ETA.
+
+### Usage
+
+```bash
+./convert.sh                      # interactive menu
+./convert.sh /path/to/video.mp4   # convert one file with the saved settings
+./convert.sh /path/to/folder      # convert every video in a folder
 ```
 
-### Video codecs
+With a path argument it skips the menu and exits with a non-zero status if any file failed, so it is usable from scripts and cron.
 
-| Option | Encoder | CRF range | Preset |
-|---|---|---|---|
-| 1 | `libsvtav1` (SVT-AV1), default | 0-63 | number 0-13 (0 slowest, 13 fastest) |
-| 2 | `libx264` (H.264) | 0-51 | name, `ultrafast` to `veryslow` |
-| 3 | `libx265` (H.265) | 0-51 | name, `ultrafast` to `veryslow` |
-| 4 | `libvpx` (VP8) | 0-63 | none (uses `default`) |
-| 5 | `libvpx-vp9` (VP9) | 0-63 | none (uses `default`) |
-| 6 | `libaom-av1` (AV1) | 0-63 | name, `ultrafast` to `veryslow` |
+### Main menu
 
-Choosing VP8 or VP9 switches the output format to MKV automatically.
+| Key | Action |
+| --- | --- |
+| `1` | Video codec: SVT-AV1 (default), H.264, H.265, VP8, VP9, libaom-AV1 |
+| `2` | Quality (CRF), lower = better |
+| `3` | Speed preset |
+| `4` | Audio codec: Opus (default), AAC, FLAC, MP3, or copy |
+| `5` | Audio bitrate |
+| `6` | Advanced settings (below) |
+| `7` | Start. Enter a path, or press Enter to use the default input folders |
+| `8` | Save settings to the config file |
+| `9` | Diagnose (open the failure-diagnosis menu) |
+| `0` | Exit |
 
-### Audio codecs
+Choosing a codec also sets sensible defaults for preset and container (e.g. SVT-AV1 → preset 6 / `mkv`, H.264 → `medium` / `mp4`) and warns when your bitrate limits do not suit the codec.
 
-`libopus` (default), `aac`, `flac` (lossless), `mp3`, or `copy` (keep the original audio; the bitrate setting is then ignored).
+### Advanced settings
 
-### Start
+- **Output format:** mkv, mp4, webm, mov, avi
+- **Pixel format:** copy source, force 8-bit (`yuv420p`), or force 10-bit (`yuv420p10le`)
+- **Frame rate:** `auto` (constant frame rate only for variable-frame-rate sources) or `source` (never touch timing)
+- **Bitrate limits:** optional `maxrate` / `bufsize` with per-codec sanity checks
+- **Chunk threshold:** files longer than this are split into chunks (default 30 min)
+- **Chunk duration:** default (30–35 min chunks) or a manual length
+- **Cooldown:** fixed pause between files/chunks, or *auto* (waits on CPU temperature)
+- **Scaling:** OFF, 720p, 1080p or a custom resolution, always keeping aspect ratio
+- **Sharpening:** optional edge-aware sharpening (slower)
+- **Progress style:** simple, or an advanced bar (horizontal blocks, ASCII, shading, braille)
+- **File sorting:** order in which a batch is processed
+- **CPU threads:** keep this low (1–4) on phones
 
-Enter a file or folder path, or press **Enter** to use the default folders. A folder is scanned and a **Batch menu** appears:
-
-1. View the file list (paged)
-2. Start processing
-3. Cancel the batch
-
-Files that were already completed in an earlier run are marked and skipped.
-
-### Diagnose
-
-Opens the diagnosis tool for files that failed earlier (see [Failures](#failures-diagnosis-and-recovery)).
-
----
-
-## Advanced menu
-
-| # | Setting | Choices / meaning |
-|---|---|---|
-| 1 | **Output format** | `mkv` (default), `mp4`, `webm`, `mov`, `avi`. Incompatible codec/container pairs are warned about (AV1 or VP in MP4/MOV, H.264/H.265 in WebM, anything but H.264 in AVI) |
-| 2 | **Pixel format** | `copy` keeps the source format; `8-bit` forces `yuv420p`; `10-bit` forces `yuv420p10le` |
-| 3 | **Frame rate** | `auto` (default): only variable-frame-rate sources are converted to a constant rate; constant-rate sources are never touched. `source`: never change the frame rate or timing. See [Frame rate](#frame-rate-handling) |
-| 4 | **Bitrate limits** | Optional `-maxrate` / `-bufsize` cap (for example `800k` / `1200k`). Values are checked against sensible limits for the chosen codec |
-| 5 | **Chunk threshold** | Files longer than this are split into chunks. Default 30 min (`1800` s). Accepts values like `30m`, `1h` |
-| 6 | **Chunk duration** | `default` (30–35 minute chunks) or `manual` with your own length |
-| 7 | **Cooldown** | `manual`: fixed pause (default 10 min). `auto`: wait until the CPU cools down |
-| 8 | **Scaling** | `OFF` (default), `720P`, `1080P`, or `Custom` (for example `1920x1080`) |
-| 9 | **Sharpening** | Light edge sharpening on or off |
-| 10 | **Progress style** | `advanced` (live bar, CPU temperature, ETA, finish time) or `simple`; plus seven bar styles |
-| 11 | **File sorting** | Name A–Z / Z–A, smallest / largest first, newest / oldest first |
-| 12 | **CPU threads** | Default 2. Fewer = cooler and slower. Values above 4 trigger an overheating warning |
-
-### Default settings
+### Built-in defaults
 
 | Setting | Default |
-|---|---|
-| Video codec / CRF / preset | `libsvtav1` / `20` / `6` |
-| Audio codec / bitrate | `libopus` / `80` kbps (48 kHz) |
-| Output format | `mkv` |
-| Pixel format | `copy` |
-| Frame rate | `auto` |
-| Bitrate limits | off (`800k` max, `1200k` buffer if enabled) |
-| Chunk threshold / mode | 1800 s / `default` |
-| Cooldown | 600 s fixed |
-| Scaling / sharpening | off / off |
-| Progress style | `advanced`, `horizontal_blocks` bar |
-| Sort order | name A–Z |
+| --- | --- |
+| Video codec | `libsvtav1`, CRF 20, preset 6 |
+| Audio | `libopus`, 80 kbps |
+| Container | `mkv` |
+| Chunk threshold | 1800 s |
+| Cooldown | 600 s |
 | CPU threads | 2 |
+| Output folder | `/sdcard/Movies/ffmpeg/Converted` |
 
-### Frame rate handling
+### Features
 
-Phone recordings are often **variable frame rate (VFR)**. Some software decoders and MKV's 1 ms timestamp resolution make such files look slightly uneven, as if frames were being skipped.
+- **Batch confirmation:** shows a paged file list and lets you review before starting.
+- **Chunked encoding with resume:** long files are split, encoded piece by piece and merged. If you stop mid-way, the chunk folder is kept; rerun the script and it picks up where it left off.
+- **Completion markers:** finished inputs are recorded (by a hash of their path) so reruns skip them.
+- **Integrity checks:** inputs are probed and checked before encoding.
+- **Logs:** per-file FFmpeg logs are kept in the log folder.
+- **Clean interrupt handling:** Ctrl+C stops FFmpeg and reports what was preserved.
 
-In `auto` mode the script compares the source's `r_frame_rate` and `avg_frame_rate` with `ffprobe`:
+### Failure diagnostics and recovery
 
-- they match within 1 % (constant frame rate): no flags are added, the rate is untouched
-- they differ (VFR): the output is forced to a constant rate (`-fps_mode cfr -r N`), where `N` is the average rate snapped to the nearest standard one (23.976 … 120)
-- an unusual average rate that matches no standard one is left alone
+When a file fails, `convert.sh` does not stop the batch. It:
 
-The decision is written to the log as `FRAME RATE:`. Choose `source` to disable this completely.
+1. Classifies the failure (corrupt input, truncated file, decode errors, out of space, etc.).
+2. Isolates the problem media into a `.ffmpeg_diagnostics/<timestamp>/` folder inside the batch's input folder, with a failure report.
+3. After the batch, offers a **diagnosis menu** (also reachable with `9` from the main menu) that walks through decode tests on the source and output step by step and can **recover** the video and/or audio stream, re-mux them, and verify the result.
 
----
+### Configuration file
 
-## How it works
-
-1. **Probe.** `ffprobe` reads codec, resolution, pixel format, duration, frame rate and video/audio bitrates. Bitrates fall back to the `BPS` tag, then `mediainfo` (if installed), then a calculation from packet sizes, because MKV/WebM files often carry no bitrate field.
-2. **Plan.** Scaling, sharpening, pixel format, frame rate and bitrate limits are combined into one filter/argument set. Audio-only or unusual inputs are handled.
-3. **Encode.** Short files are encoded in one pass. Files longer than the chunk threshold go through the chunk path below.
-4. **Verify.** The output is probed and its duration compared with the source (with a tolerance). Only verified files are marked as completed.
-5. **Cool down.** A pause follows each file, and each chunk of a chunked file.
-
-Video and audio streams are mapped (`-map 0:v -map 0:a?`). Subtitles, chapters and attachments are not carried over.
-
-### Long videos: chunking and resume
-
-A file longer than the threshold is split into chunks of roughly 30–35 minutes (or your manual length). Each chunk is encoded on its own, so a crash or heat shutdown costs at most one chunk.
-
-- Chunks live in `chunks_<name>_<id>` **next to the source file**.
-- If the run is interrupted, starting it again **resumes**: valid chunks are kept, missing ones are encoded.
-- Chunks are merged strictly in order with `mkvmerge` (MKV output) or ffmpeg concat, then the merged file is verified.
-- The chunk folder is removed after a successful merge.
-
-Resume does not check that the settings are the same as in the earlier run. If you change codec, CRF or scaling in between, delete the `chunks_*` folder first.
-
-### Cooldown
-
-- **Manual:** a fixed countdown (default 10 minutes).
-- **Auto:** waits until the CPU is below 38 °C, for at most 5 minutes. If no temperature sensor can be read, the fixed countdown is used instead.
-
-The cooldown is not counted as encoding time in the ETA. The progress screen shows the live CPU temperature, a per-file ETA and the batch ETA/finish time, which are recalculated from measured speed.
-
-### Completion markers
-
-Finished files are remembered in the *completed* folder (one marker per source path). A rerun skips them. After a **fully successful** batch all markers are cleared. If any file failed, the markers are kept so a rerun only processes what is left.
-
-### Safety checks
-
-- A source is never used as its own output; the batch refuses if the output folder equals the input folder.
-- If two sources would produce the same output name (for example `x.mp4` and `x.mkv`, or names differing only by case), the later one is refused and listed as failed instead of overwriting the first.
-- ffmpeg never reads the keyboard during an encode (`-nostdin`).
-- The configuration file is parsed, not executed, and every value is validated.
+Press `8` to save settings to `video_converter.conf`. The file next to the script is used if it exists; otherwise a `video_converter.conf` in the current directory is used if present; otherwise a new one is created next to the script. It is a plain `KEY="value"` file and can be edited by hand.
 
 ---
 
-## Where files go
+## compress.sh
 
-| What | Default location |
-|---|---|
-| Input (default scan folders) | `/sdcard/Movies/ffmpeg/Job` and `/storage/F437-7513/Movies/ffmpeg/Job` |
-| Converted output | `/sdcard/Movies/ffmpeg/Converted` |
-| Per-file logs | `/sdcard/Movies/ffmpeg/Logs/<name>.log` |
-| Completion markers | `/sdcard/Movies/ffmpeg/.video_status/completed` |
-| Chunk working folders | `chunks_<name>_<id>` beside the source |
-| Failure isolation | `.ffmpeg_diagnostics/<timestamp>` inside the input folder |
-| Saved settings | `video_converter.conf` next to `convert.sh` |
+Interactive compressor aimed at hitting a size or bitrate target, with protection for phone CPUs and batteries.
 
-Subfolders of the input are scanned, and the same folder structure is created under the output and log folders. Output files are named `<source name>.<format>`.
+```bash
+./compress.sh
+```
 
-Change these paths by editing the variables at the top of `convert.sh` (the second default input folder is an SD-card path and will need your own card ID) or by editing the saved configuration.
+You are prompted for an input file or folder; then:
 
----
+| Key | Action |
+| --- | --- |
+| `1` | Compress to a **target size** (MB) |
+| `2` | Compress to a **target bitrate** |
+| `3` | Compression method: **H.264** or **AV1** (SVT-AV1) |
+| `4` | Resolution cap (`Disabled` or `WIDTHxHEIGHT`) |
+| `5` | Convert video to **GIF** (two-pass palette, size-targeted retries) |
+| `6` | Exit |
+| `T` | CPU / thermal settings |
 
-## Configuration file
+**Notes**
 
-**8 Save** writes `video_converter.conf` as plain `KEY="value"` lines. It is read from the script's folder first, then from the current directory. Unknown keys and invalid values are ignored, so a damaged file cannot run commands or crash the script.
+- "MB" means MiB (1024 × 1024 bytes).
+- Audio is encoded as Opus (64 kbps by default, and that amount is reserved when targeting a size). Size targets that would need less than 50 kbps of video bitrate are refused.
+- If a size target is overshot, the file is re-encoded once more by default (`MAX_SIZE_RETRIES`).
+- Existing output files are handled by `OVERWRITE_POLICY` (`rename` | `skip` | `overwrite`).
+- A warning is shown for GIFs from clips longer than 30 seconds.
+- **Thermal guard** (needs `termux-api`): pauses encoding when battery temperature exceeds a limit (default 40 °C) and resumes at 37 °C. Also configurable: thread count, `nice` level, cooldown between files, x264 preset.
 
-| Key | Allowed values |
-|---|---|
-| `INPUT_DIR`, `OUTPUT_DIR`, `LOG_DIR`, `COMPLETED_DIR` | any path |
-| `VIDEO_CODEC`, `AUDIO_CODEC`, `PRESET` | names such as `libsvtav1`, `libopus`, `6` |
-| `CRF`, `AUDIO_BITRATE`, `CPU_THREADS` | whole numbers |
-| `PIXFMT_MODE` | `copy`, `8-bit`, `10-bit` |
-| `FPS_HANDLING` | `auto`, `source` |
-| `OUTPUT_FORMAT` | `mkv`, `mp4`, `webm`, `mov`, `avi` |
-| `BITRATE_LIMITS_ENABLED`, `AUTO_COOLDOWN`, `SHARPEN_EDGES` | `0` or `1` |
-| `MAXRATE`, `BUFSIZE` | for example `800k`, `2M` |
-| `CHUNK_THRESHOLD`, `MANUAL_CHUNK_DURATION`, `COOLDOWN_TIME` | seconds |
-| `CHUNK_MODE` | `default`, `manual` |
-| `SCALING_MODE` | `OFF`, `720P`, `1080P`, `Custom` |
-| `CUSTOM_RESOLUTION` | `WIDTHxHEIGHT` |
-| `PROGRESS_STYLE` | `simple`, `advanced` |
-| `BAR_STYLE` | `horizontal_blocks`, `ascii`, `shading_blocks`, `braille`, `arrow`, `circle`, `vertical_blocks` |
-| `FILE_SORT_MODE` | `name_az`, `name_za`, `size_small`, `size_large`, `date_new`, `date_old` |
+Default output folder: `/sdcard/Movies/ffmpeg/Compressed`. Edit the settings block at the top of the script or use the in-app menus.
 
 ---
 
-## Failures, diagnosis and recovery
+## trim.sh
 
-When a file fails (encode error, bad output, failed merge), the script:
+Cut or split a video from the command line or an interactive menu.
 
-1. writes the reason to that file's log,
-2. copies the original, any partial output, the logs and probe data into `.ffmpeg_diagnostics/<timestamp>/<name>/` inside the input folder,
-3. continues with the rest of the batch,
-4. offers a menu at the end: **start diagnosis**, **return to the main menu**, or **view isolated files and failure details**.
+```bash
+./trim.sh                                    # interactive menu
+./trim.sh FILE RANGES...                     # cut ranges (START-END)
+./trim.sh FILE TIMESTAMPS...                 # split at the given points
+./trim.sh FILE N                             # split into N equal parts (N >= 2)
+```
 
-The interactive diagnosis (also reachable from main-menu option **9 Diagnose**) runs staged checks, for example a full decode test of the source, and shows what it found and why. Where possible it can **recover**: re-encode the video and audio streams separately, mux them, verify the result and install it into the output folder. Each stage can be run, skipped, retried or stopped (Enter / S / R / Q).
+**Options (after FILE)**
 
-Nothing in the diagnostics folder is deleted automatically.
+| Option | Meaning |
+| --- | --- |
+| `-e`, `--encode` | Re-encode for exact cuts (MP4 output) instead of stream copy |
+| `--size MB` | Re-encode and aim for roughly this size per output file |
+| `--crf N` | H.264 quality, 0–51 (default 23) |
+| `--preset NAME` | x264 preset (default `medium`) |
+| `-h`, `--help` | Show help |
+
+**Time format**
+
+Dot-separated, from the right: seconds, minutes, hours, milliseconds.
+
+| Written | Means |
+| --- | --- |
+| `1` | 1 s |
+| `10.1` | 10 min 1 s |
+| `4.1.10` | 4 h 1 min 10 s |
+| `0.0.1.500` | 1.5 s |
+| `s` / `e` | start / end of the video |
+
+A single number as the only argument means "split into N equal parts", so use `0.5` for a cut at 5 seconds.
+
+**Example**
+
+```bash
+./trim.sh video.mp4 s-11 2.2-4.4.4 m 5.5.5.555-e
+```
+
+Produces two outputs: (1) 0–11 s, and (2) `00:02:02–04:04:04` joined (`m`) with `05:05:05.555–end`.
+
+**Copy vs re-encode**
+
+- *Copy* is instant and keeps the original format, but cuts snap to keyframes.
+- *Re-encode* is slower but frame-accurate. Audio is AAC so it plays everywhere.
+
+Defaults can be overridden via environment: `OUTDIR`, `VCODEC`, `THREADS`. Default output: `/sdcard/Movies/ffmpeg/Trimmed`. Finished parts are kept if you abort; the unfinished one is removed.
+
+---
+
+## merge.sh
+
+Merges every video in a folder into one file, in name order.
+
+```bash
+./merge.sh "/sdcard/Movies/Trip/Day 1" "/sdcard/Movies/Trip/Day 2"
+./merge.sh                      # prompts for folders, one per line; blank line to finish
+```
+
+- Accepts `.mp4`, `.mkv`, `.webm`, `.mov`. Hidden files are ignored.
+- Folders are searched at any depth: if a given folder has no videos itself, each subfolder containing videos is merged separately under its own folder name.
+- **Method:** `mkvmerge` when available (output is Matroska), otherwise FFmpeg's concat demuxer. Concat needs all files to share the same codec, resolution and audio format, and the script refuses otherwise.
+- Folders with a single video are skipped. The output folder is never scanned, so earlier merges are not merged again.
+- Checks free space first and prints a batch summary (successful / failed / skipped). Exits non-zero if any folder failed.
+
+Output folder: `/sdcard/Movies/ffmpeg/Merged` (override with `MERGE_OUTDIR=/path ./merge.sh ...`).
+
+---
+
+## v2g.sh
+
+Standalone batch converter between video and animated GIF, with its own menu.
+
+- **Video → GIF:** two-pass `palettegen` / `paletteuse`, dither and palette-stats options, optional start time and duration.
+- **GIF → Video:** MP4 (H.264), WebM (VP9) or MKV, with CRF, preset, pixel format and VP9 quality settings.
+- Frame rate and width can each follow the source (`dynamic`) or be fixed.
+- FFmpeg thread count defaults to 1 for the lowest CPU load.
+
+Default folders (all editable from the menu or at the top of the script):
+
+| Purpose | Path |
+| --- | --- |
+| Video → GIF input | `/sdcard/Movies/ffmpeg/Converted` |
+| Video → GIF output | `/sdcard/Movies/ffmpeg/GIF/Video-to-GIF` |
+| GIF → Video output | `/sdcard/Movies/ffmpeg/GIF/GIF-to-Video` |
+
+---
+
+## Default folders and environment overrides
+
+| Script | Default output | Override |
+| --- | --- | --- |
+| `convert.sh` | `/sdcard/Movies/ffmpeg/Converted` | Settings menu / config file |
+| `compress.sh` | `/sdcard/Movies/ffmpeg/Compressed` | `COMPRESS_OUTDIR` |
+| `trim.sh` | `/sdcard/Movies/ffmpeg/Trimmed` | `OUTDIR` |
+| `merge.sh` | `/sdcard/Movies/ffmpeg/Merged` | `MERGE_OUTDIR` |
+| `v2g.sh` | `/sdcard/Movies/ffmpeg/GIF/...` | Menu / top of script |
+
+`convert.sh` looks for input in `/sdcard/Movies/ffmpeg/Job` and `/storage/F437-7513/Movies/ffmpeg/Job` (the second is an SD-card path; change `DEFAULT_INPUT_DIR_2` in `convert.sh` to match your card's ID), unless you give it a path. Its logs go to `/sdcard/Movies/ffmpeg/Logs` and completion markers to `/sdcard/Movies/ffmpeg/.video_status/completed` unless changed in the config.
+
+Debugging aid for `convert.sh`: `VERBOSE_LOAD=1 ./convert.sh` lists each module and the functions it loads.
 
 ---
 
 ## Project layout
 
 ```
-convert.sh               entry point: settings, folders, input handling, main loop
-lib-config.sh            dependency check, config load/save, time/size helpers, scaling rules
-lib-probe.sh             ffprobe analysis, bitrate and frame-rate detection, integrity check
-lib-encode.sh            batch scan and sorting, single-pass and chunked encoding, merge, ETA
-lib-diagnostics.sh       failure classification, isolation, post-batch menu
-lib-diag-recovery.sh     interactive diagnosis and stream recovery
-lib-ui-kit.sh            shared look and feel (boxes, rows, prompts), CPU temperature
-lib-ui-info.sh           input/output info cards, progress bars, countdown
-lib-ui-main_menu.sh      main menu
-lib-ui-adv_menu.sh       advanced menu
-CHANGES.md               list of bugs fixed in the review, and open decisions
-fixes.diff               unified diff of those fixes
+convert.sh              Main converter (entry point)
+├─ lib-config.sh        Config load/save, completion markers, dependency check, bitrate/scaling rules
+├─ lib-probe.sh         ffprobe helpers: stream info, bitrates, integrity checks, fps handling
+├─ lib-encode.sh        Batch queue, ETA, chunking, FFmpeg encode, chunk merge
+├─ lib-diagnostics.sh   Failure classification, isolation, reports, post-batch menu
+├─ lib-diag-recovery.sh Step-by-step diagnosis and stream recovery
+├─ lib-ui-kit.sh        Terminal UI primitives (rows, boxes, prompts, colours)
+├─ lib-ui-info.sh       Input/output info panels and progress bars
+├─ lib-ui-main_menu.sh  Main menu
+└─ lib-ui-adv_menu.sh   Advanced settings menu
+
+compress.sh             Standalone: size/bitrate compression and GIF
+trim.sh                 Standalone: cut, split, join
+merge.sh                Standalone: folder merge
+v2g.sh                  Standalone: video <-> GIF
 ```
-
-Each module has a loading guard, so it is safe to source twice.
-
----
-
-## Notes and limitations
-
-- Output is written directly to its final name. An interrupted single-pass encode can leave a partial file there, and a rerun overwrites an existing output of the same name.
-- `-map 0:v -map 0:a?` means cover-art streams are treated as video, and subtitles, chapters and attachments are dropped.
-- Single-pass and chunked SVT-AV1 runs use slightly different encoder parameters.
-- The output-format check looks at the video codec only, not the audio codec (for example WebM with AAC is not flagged).
-- `mkvmerge` is a required tool in the dependency check, although the merge can fall back to ffmpeg. The ffmpeg-concat fallback re-encodes audio with `libopus` if stream copy fails.
-- Stopping with SIGTERM (instead of Ctrl+C) may leave an ffmpeg process running; check with `pgrep ffmpeg`.
-- Developed for Termux. The automated checks in `CHANGES.md` were run on Linux (bash 5.2, ffmpeg 6.1) with short test clips, not on a phone.
-- Long AV1 encodes keep the CPU busy for hours. Keep the phone cool, plugged in and with battery optimisation off for Termux (`termux-wake-lock` helps), and keep threads at 1–4.
 
 ---
 
 ## Troubleshooting
 
-| Problem | What to do |
-|---|---|
-| `MISSING DEPENDENCIES` | Run the `pkg install ...` line the script prints |
-| `CANNOT CREATE OR WRITE ... FOLDER` | Run `termux-setup-storage`, or change the folder in `convert.sh` or the config |
-| "No video files found" in the default folders | Put videos in `/sdcard/Movies/ffmpeg/Job`, or type the path at the **Start** prompt |
-| Encoder not found | Your ffmpeg build lacks it; choose another codec or install a fuller ffmpeg build |
-| Playback looks slightly jerky on some players | Keep **Frame rate** on `auto` (it converts variable-rate sources to a constant rate) |
-| Resumed output looks mixed | Delete the `chunks_*` folder next to the source and start again |
-| A file keeps failing | Open **9 Diagnose**, or read its log in the Logs folder |
-| Phone gets hot / throttles | Lower threads, raise the preset number (faster), use auto cooldown, take breaks between files |
+**"Cannot create or write" a folder under `/sdcard`**
+Run `termux-setup-storage` and accept the permission prompt.
+
+**`convert.sh`: "FAILED TO LOAD" or "MISSING REQUIRED FUNCTION"**
+A `lib-*.sh` file is missing or in a different folder. Keep them all next to `convert.sh`.
+
+**"MISSING DEPENDENCIES"**
+Run the `pkg install ...` command the script prints. `mkvmerge` needs `x11-repo` first.
+
+**Encoder not available**
+Your FFmpeg build may not include `libsvtav1`, `libx265`, etc. Check with `ffmpeg -encoders | grep -i av1`, or pick a different codec.
+
+**Phone gets hot or throttles**
+Lower CPU threads, raise the preset number (faster), enable cooldown (auto in `convert.sh`), or turn on the thermal guard in `compress.sh`.
+
+**`merge.sh`: "files do not share the same codec / size / audio format"**
+FFmpeg concat can only join identical streams. Install `mkvtoolnix` (it handles more cases), or re-encode the files to matching settings first with `convert.sh`.
+
+**Trim cuts are a bit off**
+Copy mode snaps to keyframes. Use `-e` / `--encode` for exact cuts.
+
+**Windows line endings**
+If a script fails with `\r: command not found`, convert it with `sed -i 's/\r$//' *.sh`.
